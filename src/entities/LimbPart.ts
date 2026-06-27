@@ -36,7 +36,7 @@ export class LimbPart {
 
     const w = def.w * scale;
     const h = def.h * scale;
-    const tex = def.shape === 'circle' ? Tex.DISC : Tex.PX;
+    const tex = def.shape === 'circle' ? Tex.ORB : Tex.LIMB;
     const sprite = scene.matter.add.sprite(x, y, tex);
 
     if (def.shape === 'circle') {

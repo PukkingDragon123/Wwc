@@ -11,6 +11,8 @@ import { getItem } from '../data/items';
 import { UPGRADES } from '../data/upgrades';
 import { availableRecipes, canCraft } from '../systems/CraftingSystem';
 import { countItem } from '../systems/InventorySystem';
+import { LightingSystem } from '../systems/LightingSystem';
+import { AudioBus } from '../audio/AudioBus';
 import { FONT } from '../ui/widgets';
 import { fadeTo, gameOver } from './flow';
 
@@ -36,6 +38,8 @@ export class BunkerScene extends Phaser.Scene {
   private stations: Station[] = [];
   private panel?: Phaser.GameObjects.Container;
   private panelOpen = false;
+  private lighting!: LightingSystem;
+  private lightPoints: { x: number; y: number }[] = [];
   private unsubs: Array<() => void> = [];
 
   constructor() {
@@ -47,12 +51,20 @@ export class BunkerScene extends Phaser.Scene {
     this.stations = [];
     this.cameras.main.setBounds(0, 0, this.scale.width, this.scale.height);
 
+    this.lightPoints = [];
     this.buildRoom();
     this.buildStations();
     this.spawnRescues();
 
-    this.player = new Player(this, 360, G - 70);
+    this.player = new Player(this, 360, G - 70, G);
     this.player.combatEnabled = false;
+
+    // warm, cozy chiaroscuro — gentle darkness with candle-lit pools
+    this.lighting = new LightingSystem(this, 70);
+    this.lighting.setDarkColor(Palette.home.bgGlow);
+    this.lighting.setAmbient(0.2); // warm-dim but clearly brighter/safer than outside
+    this.lighting.addLight(() => ({ x: this.player.x, y: this.player.y - 6 }), 240, 0.03);
+    for (const p of this.lightPoints) this.lighting.addStatic(p.x, p.y, 185, 0.07);
 
     this.cursors = this.input.keyboard!.createCursorKeys();
     this.keys = this.input.keyboard!.addKeys('A,D,W,SPACE,E,I,ESC') as Record<
@@ -63,16 +75,20 @@ export class BunkerScene extends Phaser.Scene {
     this.prompt = this.add
       .text(0, 0, '', { fontFamily: FONT, fontSize: '14px', color: cssColor(Palette.home.candle) })
       .setOrigin(0.5)
-      .setDepth(60);
+      .setDepth(76);
 
     this.unsubs.push(EventBus.on(GameEvents.PLAYER_DIED, (c: string) => gameOver(this, c)));
     this.unsubs.push(EventBus.on(GameEvents.BUNKER_CHANGED, () => this.refreshRoom()));
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.unsubs.forEach((u) => u());
       this.unsubs = [];
+      AudioBus.stopAmbient();
+      if (this.lighting) this.lighting.destroy();
     });
+    this.input.on('pointerdown', () => AudioBus.ensure());
 
     EventBus.emit(GameEvents.SCENE_MOOD, 'home');
+    AudioBus.startAmbient('home');
     this.cameras.main.fadeIn(360, 20, 14, 8);
   }
 
@@ -132,14 +148,21 @@ export class BunkerScene extends Phaser.Scene {
     } else {
       this.add.image(x, y + 8, Tex.PX).setDisplaySize(48, 44).setTint(color).setDepth(3);
     }
-    // candle glow accent on most stations
+    // candle glow accent on most stations (also a warm light source)
     if (kind !== 'door') {
-      this.add.image(x, y - 26, Tex.GLOW).setTint(Palette.home.candle).setAlpha(0.22).setScale(2).setDepth(2);
+      this.add
+        .image(x, y - 26, Tex.GLOW)
+        .setTint(Palette.home.candle)
+        .setBlendMode(Phaser.BlendModes.ADD)
+        .setAlpha(0.3)
+        .setScale(2)
+        .setDepth(2);
+      this.lightPoints.push({ x, y: y - 20 });
     }
     this.add
       .text(x, y - 58, label, { fontFamily: FONT, fontSize: '12px', color: cssColor(Palette.ui.textDim) })
       .setOrigin(0.5)
-      .setDepth(5);
+      .setDepth(75);
     this.stations.push({ x, range: 60, label: `E: ${label}`, act });
   }
 
@@ -169,8 +192,9 @@ export class BunkerScene extends Phaser.Scene {
   }
 
   // ---- main loop ----
-  update(_t: number, _delta: number): void {
+  update(time: number, _delta: number): void {
     (globalThis as Record<string, unknown>).__WWC__ = { scene: 'Bunker', x: this.player.x };
+    this.lighting.update(this.cameras.main, time);
     if (this.panelOpen) {
       this.player.update({ left: false, right: false, jumpPressed: false });
       if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) this.closePanel();

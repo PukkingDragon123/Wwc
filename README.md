@@ -33,8 +33,18 @@ npm run test      # headless unit tests (vitest)
 - **W / Space / ↑** — jump
 - **Mouse** — aim; **Left click** — swing weapon
 - **E** — interact (loot containers, bunker door, stations, rescue animals)
-- **Tab / I** — inventory
-- **Esc** — pause / menu
+- **C** — cycle camera view (Cinematic / Close / Wide)
+- **I** — supplies / inventory (in the bunker)
+- **Esc** — close panel
+
+## Look & feel
+
+The world is rendered with dynamic 2D lighting — a near-black, fog-bound wasteland
+that your lantern (and scattered fires) carve visibility from, with glowing mutant
+eyes watching from the dark. Combat is physics-driven ragdoll gore: impulse hits,
+dismemberment, blood pools and gibs, slow-mo kill punches, and a heartbeat that
+rises as your health falls. The bunker is the warm, candle-lit inverse. All visuals
+and audio are generated procedurally in code — no asset files.
 
 ## Architecture
 

@@ -136,6 +136,8 @@ export interface BunkerState {
 export interface GameStateData {
   version: number;
   day: number;
+  timeOfDay: number; // 0..1 within the current day; resumes across re-entries
+  pendingExposure: number; // surface seconds accrued, consumed at sleep
   player: PlayerStats;
   inventory: InventoryItem[];
   equippedWeapon: ItemId | null;

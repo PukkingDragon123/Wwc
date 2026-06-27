@@ -4,6 +4,7 @@ import { SaveManager } from '../state/SaveManager';
 import { Tex } from '../gfx/TextureFactory';
 import { Palette, cssColor } from '../gfx/palette';
 import { textButton, FONT } from '../ui/widgets';
+import { AudioBus } from '../audio/AudioBus';
 
 export class MainMenuScene extends Phaser.Scene {
   constructor() {
@@ -60,6 +61,7 @@ export class MainMenuScene extends Phaser.Scene {
   }
 
   private enterGame(): void {
+    AudioBus.ensure();
     this.scene.launch('Hud');
     this.scene.start('Bunker');
   }

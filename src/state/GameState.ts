@@ -29,6 +29,8 @@ function freshData(): GameStateData {
   return {
     version: SAVE_VERSION,
     day: 1,
+    timeOfDay: 0,
+    pendingExposure: 0,
     player: {
       health: Balance.PLAYER_MAX_HEALTH,
       maxHealth: Balance.PLAYER_MAX_HEALTH,
@@ -53,12 +55,9 @@ function freshData(): GameStateData {
 
 class GameStateImpl {
   data: GameStateData = freshData();
-  // transient within-day accumulator (persisted so a mid-day save is safe)
-  pendingExposure = 0;
 
   newGame(): void {
     this.data = freshData();
-    this.pendingExposure = 0;
     this.recomputeMaxHealth();
     EventBus.emit(GameEvents.DAY_ADVANCED, this.data.day);
     EventBus.emit(GameEvents.HEALTH_CHANGED, this.data.player);
@@ -69,7 +68,8 @@ class GameStateImpl {
 
   loadFrom(data: GameStateData): void {
     this.data = data;
-    this.pendingExposure = 0;
+    if (this.data.timeOfDay === undefined) this.data.timeOfDay = 0;
+    if (this.data.pendingExposure === undefined) this.data.pendingExposure = 0;
     this.recomputeMaxHealth();
     EventBus.emit(GameEvents.DAY_ADVANCED, this.data.day);
     EventBus.emit(GameEvents.HEALTH_CHANGED, this.data.player);
@@ -143,16 +143,20 @@ class GameStateImpl {
   }
 
   changeMutation(delta: number): void {
+    const hpBefore = this.data.player.health;
     this.data.player.mutation = Math.max(0, Math.min(100, this.data.player.mutation + delta));
     this.recomputeMaxHealth();
     EventBus.emit(GameEvents.MUTATION_CHANGED, this.data.player);
-    EventBus.emit(GameEvents.HEALTH_CHANGED, this.data.player);
+    if (this.data.player.health !== hpBefore) EventBus.emit(GameEvents.HEALTH_CHANGED, this.data.player);
     if (this.data.player.mutation >= 100) EventBus.emit(GameEvents.PLAYER_DIED, 'mutation');
   }
 
   addExposure(seconds: number): void {
-    this.pendingExposure += seconds;
-    this.data.flags.__exposureMirror = this.pendingExposure > 0;
+    this.data.pendingExposure += seconds;
+  }
+
+  setTimeOfDay(t: number): void {
+    this.data.timeOfDay = t;
   }
 
   // ---- inventory ----
@@ -246,8 +250,9 @@ class GameStateImpl {
     const p = this.data.player;
 
     // mutation: base + accumulated surface exposure, reduced by decontamination
-    const mut = dailyMutationGain(this.pendingExposure, this.upgradeLevel('decon'));
-    this.pendingExposure = 0;
+    const mut = dailyMutationGain(this.data.pendingExposure, this.upgradeLevel('decon'));
+    this.data.pendingExposure = 0;
+    this.data.timeOfDay = 0; // a fresh day begins; the clock resets only on sleep
 
     // hunger drain; starving costs health
     this.changeHunger(-Balance.HUNGER_DRAIN_PER_DAY);

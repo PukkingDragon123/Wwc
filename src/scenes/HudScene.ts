@@ -5,6 +5,8 @@ import { Balance } from '../config/Balance';
 import { stageLabel } from '../systems/RadiationSystem';
 import { getItem } from '../data/items';
 import { Palette, cssColor, lerpColor } from '../gfx/palette';
+import { Tex } from '../gfx/TextureFactory';
+import { AudioBus } from '../audio/AudioBus';
 import { StatBar, FONT } from '../ui/widgets';
 
 // Transparent overlay scene. Runs concurrently and survives Bunker<->World
@@ -19,6 +21,9 @@ export class HudScene extends Phaser.Scene {
   private weaponText!: Phaser.GameObjects.Text;
   private bagText!: Phaser.GameObjects.Text;
   private mood: 'home' | 'world' = 'home';
+  private vignette!: Phaser.GameObjects.Image;
+  private lowHp!: Phaser.GameObjects.Image;
+  private lowHpFrac = 0;
   private unsubs: Array<() => void> = [];
 
   constructor() {
@@ -26,7 +31,28 @@ export class HudScene extends Phaser.Scene {
   }
 
   create(): void {
-    const { width } = this.scale;
+    const { width, height } = this.scale;
+
+    // cinematic frame vignette + low-HP red pulse (screen-space, behind widgets)
+    this.vignette = this.add
+      .image(width / 2, height / 2, Tex.INVGLOW)
+      .setTint(0x000000)
+      .setAlpha(0.5)
+      .setDisplaySize(width * 1.05, height * 1.15)
+      .setDepth(-10);
+    this.lowHp = this.add
+      .image(width / 2, height / 2, Tex.INVGLOW)
+      .setTint(Palette.ui.health)
+      .setAlpha(0)
+      .setDisplaySize(width * 1.05, height * 1.15)
+      .setDepth(-9);
+    this.time.addEvent({
+      delay: 760,
+      loop: true,
+      callback: () => {
+        if (this.lowHpFrac > 0) AudioBus.heartbeat(this.lowHpFrac);
+      },
+    });
 
     this.health = new StatBar(this, 16, 24, 200, 16, Palette.ui.health, Palette.ui.healthBack, 'HP');
     this.hunger = new StatBar(this, 16, 46, 200, 16, Palette.ui.hunger, Palette.ui.hungerBack, 'FOOD');
@@ -93,6 +119,10 @@ export class HudScene extends Phaser.Scene {
     this.hunger.set(p.hunger, p.maxHunger);
     this.mutation.set(p.mutation, 100);
     this.dayText.setText(`Day ${GameState.data.day}    ${stageLabel(p.mutation)}`);
+
+    const frac = p.maxHealth > 0 ? p.health / p.maxHealth : 0;
+    this.lowHpFrac = frac < 0.4 ? (0.4 - frac) / 0.4 : 0;
+    if (this.lowHp) this.lowHp.setAlpha(this.lowHpFrac * 0.5);
   }
 
   private refreshBag(): void {

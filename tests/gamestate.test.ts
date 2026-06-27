@@ -74,6 +74,17 @@ describe('GameState', () => {
     expect(GameState.rescue({ defId: 'pip', name: 'Pip', rescuedDay: 1 })).toBe(true);
   });
 
+  it('persists surface exposure and the day clock across save/load', () => {
+    GameState.addExposure(12);
+    GameState.setTimeOfDay(0.5);
+    SaveManager.save();
+    GameState.newGame();
+    expect(GameState.data.pendingExposure).toBe(0);
+    expect(SaveManager.load()).toBe(true);
+    expect(GameState.data.pendingExposure).toBe(12);
+    expect(GameState.data.timeOfDay).toBe(0.5);
+  });
+
   it('save/load round-trips the full state', () => {
     GameState.advanceDay();
     GameState.addToInventory('scrap', 7);

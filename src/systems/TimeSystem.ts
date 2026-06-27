@@ -13,6 +13,13 @@ export class TimeSystem {
     EventBus.emit(GameEvents.TIME_CHANGED, this.timeOfDay);
   }
 
+  // resume an in-progress day (re-entering the world mid-day)
+  resume(t: number): void {
+    this.timeOfDay = Math.max(0, Math.min(1, t));
+    this.warned = this.timeOfDay >= Balance.NIGHT_WARNING_AT;
+    EventBus.emit(GameEvents.TIME_CHANGED, this.timeOfDay);
+  }
+
   update(deltaMs: number): void {
     if (this.timeOfDay >= 1) return;
     this.timeOfDay = Math.min(1, this.timeOfDay + deltaMs / Balance.DAY_DURATION_MS);

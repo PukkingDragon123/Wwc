@@ -6,19 +6,22 @@ import { SaveManager } from '../state/SaveManager';
 import { Tex } from '../gfx/TextureFactory';
 import { Bg } from '../gfx/backgrounds';
 import { Palette, cssColor, lerpColor } from '../gfx/palette';
-import { CAT, distToSegment } from '../util/collision';
+import { distToSegment } from '../util/collision';
 import { Player } from '../entities/Player';
 import { Weapon } from '../entities/Weapon';
 import { Creature } from '../entities/creatures/Creature';
 import { getCreature } from '../entities/creatures/definitions';
 import { TimeSystem } from '../systems/TimeSystem';
 import { GoreSystem } from '../systems/GoreSystem';
+import { LightingSystem } from '../systems/LightingSystem';
+import { CameraDirector } from '../systems/CameraDirector';
 import { resolveHit, shouldSever } from '../systems/CombatSystem';
 import { planDay } from '../systems/SpawnSystem';
 import { rollLoot, CONTAINER_TABLES } from '../systems/LootSystem';
 import { Rng } from '../util/rng';
 import { getItem } from '../data/items';
 import { FONT } from '../ui/widgets';
+import { AudioBus } from '../audio/AudioBus';
 import { gameOver } from './flow';
 
 interface Container {
@@ -40,6 +43,8 @@ export class WorldScene extends Phaser.Scene {
   private weapon!: Weapon;
   private time2!: TimeSystem;
   private gore!: GoreSystem;
+  private lighting!: LightingSystem;
+  private camDir!: CameraDirector;
 
   private creatures: Creature[] = [];
   private containers: Container[] = [];
@@ -48,16 +53,15 @@ export class WorldScene extends Phaser.Scene {
   private sky!: Phaser.GameObjects.Rectangle;
   private skyFar!: Phaser.GameObjects.TileSprite;
   private skyMid!: Phaser.GameObjects.TileSprite;
-  private nightOverlay!: Phaser.GameObjects.Rectangle;
-  private door!: Phaser.GameObjects.Container;
+  private fog!: Phaser.GameObjects.TileSprite;
+  private fog2!: Phaser.GameObjects.TileSprite;
+  private lantern!: Phaser.GameObjects.Image;
   private prompt!: Phaser.GameObjects.Text;
 
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
   private attackQueued = false;
   private returning = false;
-  private lastContactAt = 0;
-  private unsubs: Array<() => void> = [];
 
   constructor() {
     super('World');
@@ -77,49 +81,56 @@ export class WorldScene extends Phaser.Scene {
     this.buildGround();
     this.buildDoor();
 
-    // gore layer
-    this.gore = new GoreSystem(this, W, this.scale.height + 120);
+    this.gore = new GoreSystem(this, W, this.scale.height + 120, G);
 
-    // player + weapon
-    this.player = new Player(this, Balance.PLAYER_SPAWN_X, G - 70);
-    this.cameras.main.startFollow(this.player.sprite, true, 0.12, 0.12);
-    this.cameras.main.setDeadzone(120, 80);
+    this.player = new Player(this, Balance.PLAYER_SPAWN_X, G - 70, G);
+    this.camDir = new CameraDirector(this, this.player.sprite);
     this.weapon = new Weapon(this, GameState.data.equippedWeapon ?? 'pipe');
 
-    // world contents
+    // warm lantern that travels with the player
+    this.lantern = this.add
+      .image(this.player.x, this.player.y, Tex.GLOW)
+      .setTint(Palette.light.lantern)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setAlpha(0.5)
+      .setScale(3.4)
+      .setDepth(43);
+
     this.spawnContents();
 
-    // input
+    // lighting — player lantern + any fire barrels added in spawnContents
+    this.lighting = new LightingSystem(this, 70);
+    this.lighting.setDarkColor(Palette.out.skyNight);
+    this.lighting.addLight(() => ({ x: this.player.x, y: this.player.y - 6 }), 240, 0.05);
+    for (const f of this.fireLights) this.lighting.addStatic(f.x, f.y, 200, 0.16);
+
     this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keys = this.input.keyboard!.addKeys('A,D,W,SPACE,E') as Record<
-      string,
-      Phaser.Input.Keyboard.Key
-    >;
+    this.keys = this.input.keyboard!.addKeys('A,D,W,SPACE,E,C') as Record<string, Phaser.Input.Keyboard.Key>;
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      AudioBus.ensure();
       if (p.leftButtonDown()) this.attackQueued = true;
     });
 
     this.prompt = this.add
       .text(0, 0, '', { fontFamily: FONT, fontSize: '14px', color: cssColor(Palette.ui.accent) })
       .setOrigin(0.5)
-      .setDepth(60);
+      .setDepth(76);
 
-    // collisions only used for grounded check
-    this.matter.world.on('collisionstart', this.onCollisionStart, this);
-    this.matter.world.on('collisionend', this.onCollisionEnd, this);
-
-    this.unsubs.push(
-      EventBus.on(GameEvents.PLAYER_DIED, (cause: string) => this.onPlayerDied(cause))
-    );
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.cleanup());
+    this.unsubs.push(EventBus.on(GameEvents.PLAYER_DIED, (cause: string) => this.onPlayerDied(cause)));
 
+    // resume the in-progress day clock (re-entering the world mid-day)
     this.time2 = new TimeSystem();
-    this.time2.reset();
+    this.time2.resume(GameState.data.timeOfDay);
     EventBus.emit(GameEvents.SCENE_MOOD, 'world');
     EventBus.emit(GameEvents.TOAST, { text: `Day ${GameState.data.day} — scavenge and get home`, tone: 'normal' });
+    AudioBus.startAmbient('world');
 
-    this.cameras.main.fadeIn(300, 5, 6, 10);
+    this.cameras.main.fadeIn(320, 4, 5, 8);
   }
+
+  private unsubs: Array<() => void> = [];
+  private fireLights: { x: number; y: number }[] = [];
 
   // ---- world building ----
   private buildBackground(): void {
@@ -138,21 +149,32 @@ export class WorldScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(-6);
-    this.nightOverlay = this.add
-      .rectangle(0, 0, this.scale.width, this.scale.height, Palette.out.skyNight)
-      .setOrigin(0)
-      .setScrollFactor(0)
-      .setDepth(80)
-      .setAlpha(0);
 
-    // scattered scenery debris
+    // drifting fog layers (atmosphere + depth)
+    this.fog = this.add
+      .tileSprite(0, G - 220, this.scale.width, 260, Tex.FOG)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setTint(Palette.out.fog)
+      .setAlpha(0.1)
+      .setDepth(50);
+    this.fog2 = this.add
+      .tileSprite(0, G - 120, this.scale.width, 200, Tex.FOG)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setTint(Palette.out.haze)
+      .setAlpha(0.12)
+      .setDepth(51);
+
     const rng = new Rng((GameState.data.rngSeed + GameState.data.day * 17) >>> 0);
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 44; i++) {
       const x = rng.range(300, W - 200);
       const w = rng.range(14, 46);
       const h = rng.range(10, 30);
       this.add
-        .rectangle(x, G - h / 2 + 2, w, h, lerpColor(Palette.out.debris, Palette.out.buildingDark, rng.next()))
+        .image(x, G - h / 2 + 2, Tex.LIMB)
+        .setDisplaySize(w, h)
+        .setTint(lerpColor(Palette.out.debris, Palette.out.buildingDark, rng.next()))
         .setDepth(8);
     }
   }
@@ -163,7 +185,6 @@ export class WorldScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setTint(Palette.out.ground)
       .setDepth(5);
-    // physics floor + side walls
     const floor = this.matter.add.rectangle(W / 2, G + 60, W, 120, { isStatic: true });
     (floor as MatterJS.BodyType).label = 'ground';
     const lw = this.matter.add.rectangle(20, G - 200, 40, 600, { isStatic: true });
@@ -175,83 +196,69 @@ export class WorldScene extends Phaser.Scene {
   private buildDoor(): void {
     const x = Balance.EXIT_DOOR_X;
     const c = this.add.container(x, G - 40).setDepth(9);
-    const frame = this.add.image(0, 0, Tex.PX).setDisplaySize(58, 80).setTint(Palette.home.wood);
-    const hatch = this.add.image(0, 4, Tex.PX).setDisplaySize(40, 64).setTint(Palette.home.wallLight);
-    const glow = this.add.image(0, 0, Tex.GLOW).setTint(Palette.home.amber).setAlpha(0.5).setScale(2.4);
-    const sign = this.add
-      .text(0, -58, 'HOME', { fontFamily: FONT, fontSize: '14px', color: cssColor(Palette.home.candle) })
-      .setOrigin(0.5);
+    const glow = this.add.image(0, 0, Tex.GLOW).setTint(Palette.home.amber).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0.6).setScale(2.6);
+    const frame = this.add.image(0, 0, Tex.LIMB).setDisplaySize(58, 80).setTint(Palette.home.wood);
+    const hatch = this.add.image(0, 4, Tex.LIMB).setDisplaySize(40, 64).setTint(Palette.home.wallLight);
+    const sign = this.add.text(0, -58, 'HOME', { fontFamily: FONT, fontSize: '14px', color: cssColor(Palette.home.candle) }).setOrigin(0.5);
     c.add([glow, frame, hatch, sign]);
-    this.door = c;
   }
 
   private spawnContents(): void {
     const plan = planDay(GameState.data.rngSeed, GameState.data.day, W);
+    for (const t of plan.threats) this.creatures.push(new Creature(this, getCreature(t.id), t.x, G - 80, G));
+    for (const cu of plan.cuties) this.creatures.push(new Creature(this, getCreature(cu.id), cu.x, G - 60, G));
 
-    for (const t of plan.threats) {
-      this.creatures.push(new Creature(this, getCreature(t.id), t.x, G - 80));
-    }
-    for (const cu of plan.cuties) {
-      this.creatures.push(new Creature(this, getCreature(cu.id), cu.x, G - 60));
-    }
     for (const ct of plan.containers) {
       const sprite = this.add
-        .image(ct.x, G - 18, Tex.PX)
+        .image(ct.x, G - 18, Tex.LIMB)
         .setDisplaySize(30, 36)
         .setTint(ct.kind === 'crate' ? Palette.home.crate : Palette.out.buildingLight)
         .setDepth(9);
       this.containers.push({ sprite, kind: ct.kind, looted: false });
     }
     for (const wp of plan.weaponPickups) {
-      const glow = this.add.image(wp.x, G - 16, Tex.GLOW).setTint(Palette.ui.accent).setAlpha(0.4).setScale(1.4).setDepth(8);
+      const glow = this.add.image(wp.x, G - 16, Tex.GLOW).setTint(Palette.ui.accent).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0.5).setScale(1.4).setDepth(8);
       const sprite = this.add
-        .image(wp.x, G - 16, Tex.PX)
-        .setDisplaySize(getItem(wp.id).weapon!.reach, 7)
+        .image(wp.x, G - 16, Tex.LIMB)
+        .setDisplaySize(getItem(wp.id).weapon!.reach, 8)
         .setTint(getItem(wp.id).color)
         .setRotation(-0.5)
         .setDepth(9);
       this.pickups.push({ sprite, glow, id: wp.id });
     }
-  }
 
-  // ---- collisions (grounded only) ----
-  private onCollisionStart(event: Phaser.Physics.Matter.Events.CollisionStartEvent): void {
-    this.adjustGround(event.pairs, +1);
-  }
-  private onCollisionEnd(event: Phaser.Physics.Matter.Events.CollisionEndEvent): void {
-    this.adjustGround(event.pairs, -1);
-  }
-  private adjustGround(pairs: Phaser.Types.Physics.Matter.MatterCollisionPair[], delta: number): void {
-    const pb = this.player.body;
-    for (const pair of pairs) {
-      const a = pair.bodyA as MatterJS.BodyType;
-      const b = pair.bodyB as MatterJS.BodyType;
-      const other = a === pb ? b : b === pb ? a : null;
-      if (!other) continue;
-      if (other.label === 'ground' || other.label === 'wall') {
-        this.player.groundContacts = Math.max(0, this.player.groundContacts + delta);
-      }
+    // a couple of flickering fire barrels for light + dread
+    this.fireLights = [];
+    const fr = new Rng((GameState.data.rngSeed + GameState.data.day * 53) >>> 0);
+    for (let i = 0; i < 3; i++) {
+      const x = 900 + i * 1300 + fr.range(-200, 200);
+      if (x > W - 300) continue;
+      this.add.image(x, G - 16, Tex.LIMB).setDisplaySize(26, 34).setTint(0x2a2420).setDepth(8);
+      const fire = this.add.image(x, G - 30, Tex.GLOW).setTint(Palette.light.fire).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0.6).setScale(1.6).setDepth(9);
+      this.tweens.add({ targets: fire, alpha: 0.35, scale: 1.3, duration: 260, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+      this.fireLights.push({ x, y: G - 26 });
     }
   }
 
   // ---- main loop ----
   update(_t: number, delta: number): void {
-    (globalThis as Record<string, unknown>).__WWC__ = {
-      scene: 'World',
-      x: this.player.x,
-      t: this.time2 ? this.time2.timeOfDay : 0,
-    };
-    // parallax always
+    (globalThis as Record<string, unknown>).__WWC__ = { scene: 'World', x: this.player.x, t: this.time2 ? this.time2.timeOfDay : 0 };
+
     this.skyFar.tilePositionX = this.cameras.main.scrollX * 0.2;
     this.skyMid.tilePositionX = this.cameras.main.scrollX * 0.5;
+    this.fog.tilePositionX += 0.12;
+    this.fog2.tilePositionX -= 0.18;
+    this.lantern.setPosition(this.player.x, this.player.y - 6);
 
     if (this.returning) return;
 
-    const kb = this.input.keyboard!;
     const jumpPressed =
       Phaser.Input.Keyboard.JustDown(this.keys.W) ||
       Phaser.Input.Keyboard.JustDown(this.keys.SPACE) ||
       Phaser.Input.Keyboard.JustDown(this.cursors.up!);
+    if (Phaser.Input.Keyboard.JustDown(this.keys.C)) {
+      EventBus.emit(GameEvents.TOAST, { text: `Camera: ${this.camDir.cycleMode()}`, tone: 'normal' });
+    }
 
     this.player.update({
       left: this.cursors.left!.isDown || this.keys.A.isDown,
@@ -259,29 +266,35 @@ export class WorldScene extends Phaser.Scene {
       jumpPressed,
     });
 
-    // weapon
     const hand = this.player.handPosition();
     if (this.attackQueued) {
       this.attackQueued = false;
-      if (this.weapon.startSwing()) this.cameras.main.shake(40, 0.002);
+      if (this.player.combatEnabled && this.weapon.startSwing()) {
+        AudioBus.swing();
+        this.camDir.kick(0.002, 60);
+      }
     }
     this.weapon.update(delta, hand, this.player.facing);
     this.processSwing(hand);
 
-    // creatures
-    for (const c of this.creatures) c.update(delta, this.player.x, this.player.y);
+    let inCombat = false;
+    for (const c of this.creatures) {
+      c.update(delta, this.player.x, this.player.y);
+      if (c.alive && c.isThreat() && Math.abs(c.x - this.player.x) < 240) inCombat = true;
+    }
     this.applyContactDamage();
 
-    // time + exposure + lighting
     this.time2.update(delta);
+    GameState.setTimeOfDay(this.time2.timeOfDay);
     GameState.addExposure(delta / 1000);
-    this.updateLighting();
+    this.updateLighting(_t);
+    this.camDir.update(this.player.facing, inCombat);
+
     if (this.time2.isNight()) {
       this.returnHome(true);
       return;
     }
-
-    this.updateInteraction(kb);
+    this.updateInteraction();
   }
 
   private processSwing(hand: { x: number; y: number }): void {
@@ -298,20 +311,22 @@ export class WorldScene extends Phaser.Scene {
         const preHp = limb.hp;
         const destroyed = limb.takeDamage(hit.damage);
 
-        const kv = 3 + this.weapon.profile.weight * 3.4;
+        const kv = 3 + this.weapon.profile.weight * 3.4 + hit.knockback * 40;
         limb.applyKnock(seg.dirX * kv, seg.dirY * kv - 1.5);
         this.gore.bloodBurst(limb.x, limb.y, Balance.BLOOD_PER_HIT);
-        this.cameras.main.shake(50, 0.003);
+        AudioBus.squelch();
+        this.camDir.kick(0.003, 50);
 
         if (destroyed) {
           const sever = shouldSever(preHp, hit.damage, hit.canSever, limb.severable);
           if (sever) {
             limb.sever();
             limb.applyKnock(seg.dirX * kv * 1.4, -3);
-            this.gore.spawnGibs(limb.x, limb.y, 4);
+            this.gore.spawnGibs(limb.x, limb.y, 5);
             this.gore.bloodBurst(limb.x, limb.y, Balance.BLOOD_PER_SEVER);
             this.gore.splatDecal(limb.x, G - 4);
-            this.gore.registerDebris(limb.sprite);
+            this.gore.screenFlash();
+            AudioBus.sever();
           }
           if (c.alive && c.registerLimbDestroyed(limb)) this.killCreature(c);
         }
@@ -322,23 +337,29 @@ export class WorldScene extends Phaser.Scene {
   private killCreature(c: Creature): void {
     c.die();
     GameState.recordKill();
-    this.cameras.main.shake(120, 0.006);
+    this.camDir.killPunch();
+    AudioBus.screech();
     this.gore.bloodBurst(c.x, c.y, Balance.BLOOD_PER_SEVER);
     this.gore.splatDecal(c.x, G - 4);
+    this.gore.bloodPool(c.x);
 
     if (c.isThreat()) {
       const rng = new Rng((GameState.data.rngSeed + GameState.data.kills * 2654435761) >>> 0);
-      const loot = rollLoot(c.def.loot, rng);
-      for (const it of loot) {
+      for (const it of rollLoot(c.def.loot, rng)) {
         GameState.addToInventory(it.id, it.qty);
         EventBus.emit(GameEvents.TOAST, { text: `+${it.qty} ${getItem(it.id).name}`, tone: 'good' });
       }
     }
 
-    // fade the corpse after a while
     this.time.delayedCall(Balance.CORPSE_LIFETIME_MS, () => {
+      const live = c.limbs.map((l) => l.sprite).filter((s) => s && s.active);
+      if (live.length === 0) {
+        c.destroy();
+        this.creatures = this.creatures.filter((x) => x !== c);
+        return;
+      }
       this.tweens.add({
-        targets: c.limbs.map((l) => l.sprite),
+        targets: live,
         alpha: 0,
         duration: 600,
         onComplete: () => {
@@ -351,52 +372,46 @@ export class WorldScene extends Phaser.Scene {
 
   private applyContactDamage(): void {
     const now = this.time.now;
-    if (now - this.lastContactAt < Balance.CONTACT_DAMAGE_COOLDOWN_MS) return;
     for (const c of this.creatures) {
       if (!c.alive || !c.isThreat()) continue;
+      if (now - c.lastHitAt < Balance.CONTACT_DAMAGE_COOLDOWN_MS) continue;
       if (Math.abs(this.player.x - c.x) < 36 && Math.abs(this.player.y - c.y) < 60) {
-        this.lastContactAt = now;
+        c.lastHitAt = now;
         GameState.damagePlayer(c.def.contactDamage);
         const dir = Math.sign(this.player.x - c.x) || 1;
         this.player.sprite.setVelocity(dir * 6, -3);
-        this.cameras.main.shake(120, 0.005);
-        break;
+        this.camDir.kick(0.006, 130);
+        AudioBus.impact();
+        this.gore.screenFlash();
       }
     }
   }
 
-  // ---- interaction (E) ----
-  private updateInteraction(kb: Phaser.Input.Keyboard.KeyboardPlugin): void {
+  // ---- interaction ----
+  private updateInteraction(): void {
     const px = this.player.x;
     const py = this.player.y;
-    let best: { kind: string; dist: number; text: string; act: () => void } | null = null;
-    const consider = (dist: number, range: number, text: string, act: () => void, kind: string) => {
-      if (dist <= range && (!best || dist < best.dist)) best = { kind, dist, text, act };
+    let best: { dist: number; text: string; act: () => void } | null = null;
+    const consider = (dist: number, range: number, text: string, act: () => void) => {
+      if (dist <= range && (!best || dist < best.dist)) best = { dist, text, act };
     };
 
-    // door
-    consider(Math.abs(px - Balance.EXIT_DOOR_X), 70, 'E: go home', () => this.returnHome(false), 'door');
-
-    // containers
+    consider(Math.abs(px - Balance.EXIT_DOOR_X), 70, 'E: go home', () => this.returnHome(false));
     for (const ct of this.containers) {
-      if (ct.looted) continue;
-      consider(Math.abs(px - ct.sprite.x), 48, `E: search ${ct.kind}`, () => this.loot(ct), 'loot');
+      if (!ct.looted) consider(Math.abs(px - ct.sprite.x), 48, `E: search ${ct.kind}`, () => this.loot(ct));
     }
-    // weapon pickups
     for (const wp of this.pickups) {
-      consider(Math.abs(px - wp.sprite.x), 46, `E: take ${getItem(wp.id).name}`, () => this.takeWeapon(wp), 'weapon');
+      consider(Math.abs(px - wp.sprite.x), 46, `E: take ${getItem(wp.id).name}`, () => this.takeWeapon(wp));
     }
-    // cute rescues
     for (const c of this.creatures) {
       if (c.alive && !c.isThreat()) {
-        const d = Math.hypot(px - c.x, py - c.y);
-        consider(d, 60, `E: rescue ${c.def.name}`, () => this.rescue(c), 'rescue');
+        consider(Math.hypot(px - c.x, py - c.y), 60, `E: rescue ${c.def.name}`, () => this.rescue(c));
       }
     }
 
     if (best) {
       const b: { text: string; act: () => void } = best;
-      this.prompt.setText(b.text).setPosition(px, py - 70).setVisible(true);
+      this.prompt.setText(b.text).setPosition(px, py - 72).setVisible(true);
       if (Phaser.Input.Keyboard.JustDown(this.keys.E)) b.act();
     } else {
       this.prompt.setVisible(false);
@@ -451,27 +466,34 @@ export class WorldScene extends Phaser.Scene {
   }
 
   // ---- lighting / dusk ----
-  private updateLighting(): void {
+  private updateLighting(time: number): void {
     const d = this.time2.darkness();
     this.sky.fillColor = lerpColor(Palette.out.skyDay, Palette.out.skyDusk, Math.min(1, d * 1.3));
-    this.nightOverlay.setAlpha(d * 0.86);
+    // ambient darkness: subtle by day, near-total at night
+    this.lighting.setAmbient(0.32 + d * 0.62);
+    this.lighting.update(this.cameras.main, time);
+    this.lantern.setAlpha(0.4 + d * 0.4);
   }
 
-  // ---- return home ----
+  // ---- return home (review-fixed: no soft-lock on night death) ----
   private returnHome(forced: boolean): void {
     if (this.returning) return;
-    this.returning = true;
+    this.returning = true; // suppresses the auto PLAYER_DIED handler (no double game-over)
     this.prompt.setVisible(false);
 
     if (forced) {
       EventBus.emit(GameEvents.TOAST, { text: 'The night caught you!', tone: 'warn' });
       GameState.damagePlayer(Balance.NIGHT_CAUGHT_DAMAGE);
       GameState.changeMutation(Balance.NIGHT_CAUGHT_MUTATION);
-      if (GameState.player.health <= 0 || GameState.player.mutation >= 100) return; // gameOver handler takes over
+      if (GameState.player.health <= 0 || GameState.player.mutation >= 100) {
+        gameOver(this, GameState.player.health <= 0 ? 'night' : 'mutation');
+        return;
+      }
     }
 
+    GameState.setTimeOfDay(this.time2.timeOfDay);
     SaveManager.save();
-    this.cameras.main.fadeOut(360, 12, 9, 6);
+    this.cameras.main.fadeOut(360, 8, 6, 6);
     this.cameras.main.once('camerafadeoutcomplete', () => this.scene.start('Bunker'));
   }
 
@@ -484,8 +506,9 @@ export class WorldScene extends Phaser.Scene {
   private cleanup(): void {
     this.unsubs.forEach((u) => u());
     this.unsubs = [];
-    this.matter.world.off('collisionstart', this.onCollisionStart, this);
-    this.matter.world.off('collisionend', this.onCollisionEnd, this);
+    AudioBus.stopAmbient();
+    if (this.camDir) this.camDir.destroy();
+    if (this.lighting) this.lighting.destroy();
     if (this.gore) this.gore.destroy();
   }
 }
